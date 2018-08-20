@@ -15170,6 +15170,326 @@ cr.system_object.prototype.loadFromJSON = function (o)
 cr.shaders = {};
 ;
 ;
+cr.plugins_.AJAX = function(runtime)
+{
+	this.runtime = runtime;
+};
+(function ()
+{
+	var isNWjs = false;
+	var path = null;
+	var fs = null;
+	var nw_appfolder = "";
+	var pluginProto = cr.plugins_.AJAX.prototype;
+	pluginProto.Type = function(plugin)
+	{
+		this.plugin = plugin;
+		this.runtime = plugin.runtime;
+	};
+	var typeProto = pluginProto.Type.prototype;
+	typeProto.onCreate = function()
+	{
+	};
+	pluginProto.Instance = function(type)
+	{
+		this.type = type;
+		this.runtime = type.runtime;
+		this.lastData = "";
+		this.curTag = "";
+		this.progress = 0;
+		this.timeout = -1;
+		isNWjs = this.runtime.isNWjs;
+		if (isNWjs)
+		{
+			path = require("path");
+			fs = require("fs");
+			var process = window["process"] || nw["process"];
+			nw_appfolder = path["dirname"](process["execPath"]) + "\\";
+		}
+	};
+	var instanceProto = pluginProto.Instance.prototype;
+	var theInstance = null;
+	window["C2_AJAX_DCSide"] = function (event_, tag_, param_)
+	{
+		if (!theInstance)
+			return;
+		if (event_ === "success")
+		{
+			theInstance.curTag = tag_;
+			theInstance.lastData = param_;
+			theInstance.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnAnyComplete, theInstance);
+			theInstance.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnComplete, theInstance);
+		}
+		else if (event_ === "error")
+		{
+			theInstance.curTag = tag_;
+			theInstance.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnAnyError, theInstance);
+			theInstance.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnError, theInstance);
+		}
+		else if (event_ === "progress")
+		{
+			theInstance.progress = param_;
+			theInstance.curTag = tag_;
+			theInstance.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnProgress, theInstance);
+		}
+	};
+	instanceProto.onCreate = function()
+	{
+		theInstance = this;
+	};
+	instanceProto.saveToJSON = function ()
+	{
+		return { "lastData": this.lastData };
+	};
+	instanceProto.loadFromJSON = function (o)
+	{
+		this.lastData = o["lastData"];
+		this.curTag = "";
+		this.progress = 0;
+	};
+	var next_request_headers = {};
+	var next_override_mime = "";
+	instanceProto.doRequest = function (tag_, url_, method_, data_)
+	{
+		if (this.runtime.isDirectCanvas)
+		{
+			AppMobi["webview"]["execute"]('C2_AJAX_WebSide("' + tag_ + '", "' + url_ + '", "' + method_ + '", ' + (data_ ? '"' + data_ + '"' : "null") + ');');
+			return;
+		}
+		var self = this;
+		var request = null;
+		var doErrorFunc = function ()
+		{
+			self.curTag = tag_;
+			self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnAnyError, self);
+			self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnError, self);
+		};
+		var errorFunc = function ()
+		{
+			if (isNWjs)
+			{
+				var filepath = nw_appfolder + url_;
+				if (fs["existsSync"](filepath))
+				{
+					fs["readFile"](filepath, {"encoding": "utf8"}, function (err, data) {
+						if (err)
+						{
+							doErrorFunc();
+							return;
+						}
+						self.curTag = tag_;
+						self.lastData = data.replace(/\r\n/g, "\n")
+						self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnAnyComplete, self);
+						self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnComplete, self);
+					});
+				}
+				else
+					doErrorFunc();
+			}
+			else
+				doErrorFunc();
+		};
+		var progressFunc = function (e)
+		{
+			if (!e["lengthComputable"])
+				return;
+			self.progress = e.loaded / e.total;
+			self.curTag = tag_;
+			self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnProgress, self);
+		};
+		try
+		{
+			if (this.runtime.isWindowsPhone8)
+				request = new ActiveXObject("Microsoft.XMLHTTP");
+			else
+				request = new XMLHttpRequest();
+			request.onreadystatechange = function()
+			{
+				if (request.readyState === 4)
+				{
+					self.curTag = tag_;
+					if (request.responseText)
+						self.lastData = request.responseText.replace(/\r\n/g, "\n");		// fix windows style line endings
+					else
+						self.lastData = "";
+					if (request.status >= 400)
+					{
+						self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnAnyError, self);
+						self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnError, self);
+					}
+					else
+					{
+						if ((!isNWjs || self.lastData.length) && !(!isNWjs && request.status === 0 && !self.lastData.length))
+						{
+							self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnAnyComplete, self);
+							self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnComplete, self);
+						}
+					}
+				}
+			};
+			if (!this.runtime.isWindowsPhone8)
+			{
+				request.onerror = errorFunc;
+				request.ontimeout = errorFunc;
+				request.onabort = errorFunc;
+				request["onprogress"] = progressFunc;
+			}
+			request.open(method_, url_);
+			if (!this.runtime.isWindowsPhone8)
+			{
+				if (this.timeout >= 0 && typeof request["timeout"] !== "undefined")
+					request["timeout"] = this.timeout;
+			}
+			try {
+				request.responseType = "text";
+			} catch (e) {}
+			if (data_)
+			{
+				if (request["setRequestHeader"] && !next_request_headers.hasOwnProperty("Content-Type"))
+				{
+					request["setRequestHeader"]("Content-Type", "application/x-www-form-urlencoded");
+				}
+			}
+			if (request["setRequestHeader"])
+			{
+				var p;
+				for (p in next_request_headers)
+				{
+					if (next_request_headers.hasOwnProperty(p))
+					{
+						try {
+							request["setRequestHeader"](p, next_request_headers[p]);
+						}
+						catch (e) {}
+					}
+				}
+				next_request_headers = {};
+			}
+			if (next_override_mime && request["overrideMimeType"])
+			{
+				try {
+					request["overrideMimeType"](next_override_mime);
+				}
+				catch (e) {}
+				next_override_mime = "";
+			}
+			if (data_)
+				request.send(data_);
+			else
+				request.send();
+		}
+		catch (e)
+		{
+			errorFunc();
+		}
+	};
+	function Cnds() {};
+	Cnds.prototype.OnComplete = function (tag)
+	{
+		return cr.equals_nocase(tag, this.curTag);
+	};
+	Cnds.prototype.OnAnyComplete = function (tag)
+	{
+		return true;
+	};
+	Cnds.prototype.OnError = function (tag)
+	{
+		return cr.equals_nocase(tag, this.curTag);
+	};
+	Cnds.prototype.OnAnyError = function (tag)
+	{
+		return true;
+	};
+	Cnds.prototype.OnProgress = function (tag)
+	{
+		return cr.equals_nocase(tag, this.curTag);
+	};
+	pluginProto.cnds = new Cnds();
+	function Acts() {};
+	Acts.prototype.Request = function (tag_, url_)
+	{
+		var self = this;
+		if (this.runtime.isWKWebView && !this.runtime.isAbsoluteUrl(url_))
+		{
+			this.runtime.fetchLocalFileViaCordovaAsText(url_,
+			function (str)
+			{
+				self.curTag = tag_;
+				self.lastData = str.replace(/\r\n/g, "\n");		// fix windows style line endings
+				self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnAnyComplete, self);
+				self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnComplete, self);
+			},
+			function (err)
+			{
+				self.curTag = tag_;
+				self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnAnyError, self);
+				self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnError, self);
+			});
+		}
+		else
+		{
+			this.doRequest(tag_, url_, "GET");
+		}
+	};
+	Acts.prototype.RequestFile = function (tag_, file_)
+	{
+		var self = this;
+		if (this.runtime.isWKWebView)
+		{
+			this.runtime.fetchLocalFileViaCordovaAsText(file_,
+			function (str)
+			{
+				self.curTag = tag_;
+				self.lastData = str.replace(/\r\n/g, "\n");		// fix windows style line endings
+				self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnAnyComplete, self);
+				self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnComplete, self);
+			},
+			function (err)
+			{
+				self.curTag = tag_;
+				self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnAnyError, self);
+				self.runtime.trigger(cr.plugins_.AJAX.prototype.cnds.OnError, self);
+			});
+		}
+		else
+		{
+			this.doRequest(tag_, file_, "GET");
+		}
+	};
+	Acts.prototype.Post = function (tag_, url_, data_, method_)
+	{
+		this.doRequest(tag_, url_, method_, data_);
+	};
+	Acts.prototype.SetTimeout = function (t)
+	{
+		this.timeout = t * 1000;
+	};
+	Acts.prototype.SetHeader = function (n, v)
+	{
+		next_request_headers[n] = v;
+	};
+	Acts.prototype.OverrideMIMEType = function (m)
+	{
+		next_override_mime = m;
+	};
+	pluginProto.acts = new Acts();
+	function Exps() {};
+	Exps.prototype.LastData = function (ret)
+	{
+		ret.set_string(this.lastData);
+	};
+	Exps.prototype.Progress = function (ret)
+	{
+		ret.set_float(this.progress);
+	};
+	Exps.prototype.Tag = function (ret)
+	{
+		ret.set_string(this.curTag);
+	};
+	pluginProto.exps = new Exps();
+}());
+;
+;
 cr.plugins_.Browser = function(runtime)
 {
 	this.runtime = runtime;
@@ -19206,6 +19526,1257 @@ cr.plugins_.Rex_taffydb.databases = {}; // {db: database, ownerUID: uid }
 }());
 ;
 ;
+cr.plugins_.Sprite = function(runtime)
+{
+	this.runtime = runtime;
+};
+(function ()
+{
+	var pluginProto = cr.plugins_.Sprite.prototype;
+	pluginProto.Type = function(plugin)
+	{
+		this.plugin = plugin;
+		this.runtime = plugin.runtime;
+	};
+	var typeProto = pluginProto.Type.prototype;
+	function frame_getDataUri()
+	{
+		if (this.datauri.length === 0)
+		{
+			var tmpcanvas = document.createElement("canvas");
+			tmpcanvas.width = this.width;
+			tmpcanvas.height = this.height;
+			var tmpctx = tmpcanvas.getContext("2d");
+			if (this.spritesheeted)
+			{
+				tmpctx.drawImage(this.texture_img, this.offx, this.offy, this.width, this.height,
+										 0, 0, this.width, this.height);
+			}
+			else
+			{
+				tmpctx.drawImage(this.texture_img, 0, 0, this.width, this.height);
+			}
+			this.datauri = tmpcanvas.toDataURL("image/png");
+		}
+		return this.datauri;
+	};
+	typeProto.onCreate = function()
+	{
+		if (this.is_family)
+			return;
+		var i, leni, j, lenj;
+		var anim, frame, animobj, frameobj, wt, uv;
+		this.all_frames = [];
+		this.has_loaded_textures = false;
+		for (i = 0, leni = this.animations.length; i < leni; i++)
+		{
+			anim = this.animations[i];
+			animobj = {};
+			animobj.name = anim[0];
+			animobj.speed = anim[1];
+			animobj.loop = anim[2];
+			animobj.repeatcount = anim[3];
+			animobj.repeatto = anim[4];
+			animobj.pingpong = anim[5];
+			animobj.sid = anim[6];
+			animobj.frames = [];
+			for (j = 0, lenj = anim[7].length; j < lenj; j++)
+			{
+				frame = anim[7][j];
+				frameobj = {};
+				frameobj.texture_file = frame[0];
+				frameobj.texture_filesize = frame[1];
+				frameobj.offx = frame[2];
+				frameobj.offy = frame[3];
+				frameobj.width = frame[4];
+				frameobj.height = frame[5];
+				frameobj.duration = frame[6];
+				frameobj.hotspotX = frame[7];
+				frameobj.hotspotY = frame[8];
+				frameobj.image_points = frame[9];
+				frameobj.poly_pts = frame[10];
+				frameobj.pixelformat = frame[11];
+				frameobj.spritesheeted = (frameobj.width !== 0);
+				frameobj.datauri = "";		// generated on demand and cached
+				frameobj.getDataUri = frame_getDataUri;
+				uv = {};
+				uv.left = 0;
+				uv.top = 0;
+				uv.right = 1;
+				uv.bottom = 1;
+				frameobj.sheetTex = uv;
+				frameobj.webGL_texture = null;
+				wt = this.runtime.findWaitingTexture(frame[0]);
+				if (wt)
+				{
+					frameobj.texture_img = wt;
+				}
+				else
+				{
+					frameobj.texture_img = new Image();
+					frameobj.texture_img.cr_src = frame[0];
+					frameobj.texture_img.cr_filesize = frame[1];
+					frameobj.texture_img.c2webGL_texture = null;
+					this.runtime.waitForImageLoad(frameobj.texture_img, frame[0]);
+				}
+				cr.seal(frameobj);
+				animobj.frames.push(frameobj);
+				this.all_frames.push(frameobj);
+			}
+			cr.seal(animobj);
+			this.animations[i] = animobj;		// swap array data for object
+		}
+	};
+	typeProto.updateAllCurrentTexture = function ()
+	{
+		var i, len, inst;
+		for (i = 0, len = this.instances.length; i < len; i++)
+		{
+			inst = this.instances[i];
+			inst.curWebGLTexture = inst.curFrame.webGL_texture;
+		}
+	};
+	typeProto.onLostWebGLContext = function ()
+	{
+		if (this.is_family)
+			return;
+		var i, len, frame;
+		for (i = 0, len = this.all_frames.length; i < len; ++i)
+		{
+			frame = this.all_frames[i];
+			frame.texture_img.c2webGL_texture = null;
+			frame.webGL_texture = null;
+		}
+		this.has_loaded_textures = false;
+		this.updateAllCurrentTexture();
+	};
+	typeProto.onRestoreWebGLContext = function ()
+	{
+		if (this.is_family || !this.instances.length)
+			return;
+		var i, len, frame;
+		for (i = 0, len = this.all_frames.length; i < len; ++i)
+		{
+			frame = this.all_frames[i];
+			frame.webGL_texture = this.runtime.glwrap.loadTexture(frame.texture_img, false, this.runtime.linearSampling, frame.pixelformat);
+		}
+		this.updateAllCurrentTexture();
+	};
+	typeProto.loadTextures = function ()
+	{
+		if (this.is_family || this.has_loaded_textures || !this.runtime.glwrap)
+			return;
+		var i, len, frame;
+		for (i = 0, len = this.all_frames.length; i < len; ++i)
+		{
+			frame = this.all_frames[i];
+			frame.webGL_texture = this.runtime.glwrap.loadTexture(frame.texture_img, false, this.runtime.linearSampling, frame.pixelformat);
+		}
+		this.has_loaded_textures = true;
+	};
+	typeProto.unloadTextures = function ()
+	{
+		if (this.is_family || this.instances.length || !this.has_loaded_textures)
+			return;
+		var i, len, frame;
+		for (i = 0, len = this.all_frames.length; i < len; ++i)
+		{
+			frame = this.all_frames[i];
+			this.runtime.glwrap.deleteTexture(frame.webGL_texture);
+			frame.webGL_texture = null;
+		}
+		this.has_loaded_textures = false;
+	};
+	var already_drawn_images = [];
+	typeProto.preloadCanvas2D = function (ctx)
+	{
+		var i, len, frameimg;
+		cr.clearArray(already_drawn_images);
+		for (i = 0, len = this.all_frames.length; i < len; ++i)
+		{
+			frameimg = this.all_frames[i].texture_img;
+			if (already_drawn_images.indexOf(frameimg) !== -1)
+					continue;
+			ctx.drawImage(frameimg, 0, 0);
+			already_drawn_images.push(frameimg);
+		}
+	};
+	pluginProto.Instance = function(type)
+	{
+		this.type = type;
+		this.runtime = type.runtime;
+		var poly_pts = this.type.animations[0].frames[0].poly_pts;
+		if (this.recycled)
+			this.collision_poly.set_pts(poly_pts);
+		else
+			this.collision_poly = new cr.CollisionPoly(poly_pts);
+	};
+	var instanceProto = pluginProto.Instance.prototype;
+	instanceProto.onCreate = function()
+	{
+		this.visible = (this.properties[0] === 0);	// 0=visible, 1=invisible
+		this.isTicking = false;
+		this.inAnimTrigger = false;
+		this.collisionsEnabled = (this.properties[3] !== 0);
+		this.cur_animation = this.getAnimationByName(this.properties[1]) || this.type.animations[0];
+		this.cur_frame = this.properties[2];
+		if (this.cur_frame < 0)
+			this.cur_frame = 0;
+		if (this.cur_frame >= this.cur_animation.frames.length)
+			this.cur_frame = this.cur_animation.frames.length - 1;
+		var curanimframe = this.cur_animation.frames[this.cur_frame];
+		this.collision_poly.set_pts(curanimframe.poly_pts);
+		this.hotspotX = curanimframe.hotspotX;
+		this.hotspotY = curanimframe.hotspotY;
+		this.cur_anim_speed = this.cur_animation.speed;
+		this.cur_anim_repeatto = this.cur_animation.repeatto;
+		if (!(this.type.animations.length === 1 && this.type.animations[0].frames.length === 1) && this.cur_anim_speed !== 0)
+		{
+			this.runtime.tickMe(this);
+			this.isTicking = true;
+		}
+		if (this.recycled)
+			this.animTimer.reset();
+		else
+			this.animTimer = new cr.KahanAdder();
+		this.frameStart = this.getNowTime();
+		this.animPlaying = true;
+		this.animRepeats = 0;
+		this.animForwards = true;
+		this.animTriggerName = "";
+		this.changeAnimName = "";
+		this.changeAnimFrom = 0;
+		this.changeAnimFrame = -1;
+		this.type.loadTextures();
+		var i, leni, j, lenj;
+		var anim, frame, uv, maintex;
+		for (i = 0, leni = this.type.animations.length; i < leni; i++)
+		{
+			anim = this.type.animations[i];
+			for (j = 0, lenj = anim.frames.length; j < lenj; j++)
+			{
+				frame = anim.frames[j];
+				if (frame.width === 0)
+				{
+					frame.width = frame.texture_img.width;
+					frame.height = frame.texture_img.height;
+				}
+				if (frame.spritesheeted)
+				{
+					maintex = frame.texture_img;
+					uv = frame.sheetTex;
+					uv.left = frame.offx / maintex.width;
+					uv.top = frame.offy / maintex.height;
+					uv.right = (frame.offx + frame.width) / maintex.width;
+					uv.bottom = (frame.offy + frame.height) / maintex.height;
+					if (frame.offx === 0 && frame.offy === 0 && frame.width === maintex.width && frame.height === maintex.height)
+					{
+						frame.spritesheeted = false;
+					}
+				}
+			}
+		}
+		this.curFrame = this.cur_animation.frames[this.cur_frame];
+		this.curWebGLTexture = this.curFrame.webGL_texture;
+	};
+	instanceProto.saveToJSON = function ()
+	{
+		var o = {
+			"a": this.cur_animation.sid,
+			"f": this.cur_frame,
+			"cas": this.cur_anim_speed,
+			"fs": this.frameStart,
+			"ar": this.animRepeats,
+			"at": this.animTimer.sum,
+			"rt": this.cur_anim_repeatto
+		};
+		if (!this.animPlaying)
+			o["ap"] = this.animPlaying;
+		if (!this.animForwards)
+			o["af"] = this.animForwards;
+		return o;
+	};
+	instanceProto.loadFromJSON = function (o)
+	{
+		var anim = this.getAnimationBySid(o["a"]);
+		if (anim)
+			this.cur_animation = anim;
+		this.cur_frame = o["f"];
+		if (this.cur_frame < 0)
+			this.cur_frame = 0;
+		if (this.cur_frame >= this.cur_animation.frames.length)
+			this.cur_frame = this.cur_animation.frames.length - 1;
+		this.cur_anim_speed = o["cas"];
+		this.frameStart = o["fs"];
+		this.animRepeats = o["ar"];
+		this.animTimer.reset();
+		this.animTimer.sum = o["at"];
+		this.animPlaying = o.hasOwnProperty("ap") ? o["ap"] : true;
+		this.animForwards = o.hasOwnProperty("af") ? o["af"] : true;
+		if (o.hasOwnProperty("rt"))
+			this.cur_anim_repeatto = o["rt"];
+		else
+			this.cur_anim_repeatto = this.cur_animation.repeatto;
+		this.curFrame = this.cur_animation.frames[this.cur_frame];
+		this.curWebGLTexture = this.curFrame.webGL_texture;
+		this.collision_poly.set_pts(this.curFrame.poly_pts);
+		this.hotspotX = this.curFrame.hotspotX;
+		this.hotspotY = this.curFrame.hotspotY;
+	};
+	instanceProto.animationFinish = function (reverse)
+	{
+		this.cur_frame = reverse ? 0 : this.cur_animation.frames.length - 1;
+		this.animPlaying = false;
+		this.animTriggerName = this.cur_animation.name;
+		this.inAnimTrigger = true;
+		this.runtime.trigger(cr.plugins_.Sprite.prototype.cnds.OnAnyAnimFinished, this);
+		this.runtime.trigger(cr.plugins_.Sprite.prototype.cnds.OnAnimFinished, this);
+		this.inAnimTrigger = false;
+		this.animRepeats = 0;
+	};
+	instanceProto.getNowTime = function()
+	{
+		return this.animTimer.sum;
+	};
+	instanceProto.tick = function()
+	{
+		this.animTimer.add(this.runtime.getDt(this));
+		if (this.changeAnimName.length)
+			this.doChangeAnim();
+		if (this.changeAnimFrame >= 0)
+			this.doChangeAnimFrame();
+		var now = this.getNowTime();
+		var cur_animation = this.cur_animation;
+		var prev_frame = cur_animation.frames[this.cur_frame];
+		var next_frame;
+		var cur_frame_time = prev_frame.duration / this.cur_anim_speed;
+		if (this.animPlaying && now >= this.frameStart + cur_frame_time)
+		{
+			if (this.animForwards)
+			{
+				this.cur_frame++;
+			}
+			else
+			{
+				this.cur_frame--;
+			}
+			this.frameStart += cur_frame_time;
+			if (this.cur_frame >= cur_animation.frames.length)
+			{
+				if (cur_animation.pingpong)
+				{
+					this.animForwards = false;
+					this.cur_frame = cur_animation.frames.length - 2;
+				}
+				else if (cur_animation.loop)
+				{
+					this.cur_frame = this.cur_anim_repeatto;
+				}
+				else
+				{
+					this.animRepeats++;
+					if (this.animRepeats >= cur_animation.repeatcount)
+					{
+						this.animationFinish(false);
+					}
+					else
+					{
+						this.cur_frame = this.cur_anim_repeatto;
+					}
+				}
+			}
+			if (this.cur_frame < 0)
+			{
+				if (cur_animation.pingpong)
+				{
+					this.cur_frame = 1;
+					this.animForwards = true;
+					if (!cur_animation.loop)
+					{
+						this.animRepeats++;
+						if (this.animRepeats >= cur_animation.repeatcount)
+						{
+							this.animationFinish(true);
+						}
+					}
+				}
+				else
+				{
+					if (cur_animation.loop)
+					{
+						this.cur_frame = this.cur_anim_repeatto;
+					}
+					else
+					{
+						this.animRepeats++;
+						if (this.animRepeats >= cur_animation.repeatcount)
+						{
+							this.animationFinish(true);
+						}
+						else
+						{
+							this.cur_frame = this.cur_anim_repeatto;
+						}
+					}
+				}
+			}
+			if (this.cur_frame < 0)
+				this.cur_frame = 0;
+			else if (this.cur_frame >= cur_animation.frames.length)
+				this.cur_frame = cur_animation.frames.length - 1;
+			if (now > this.frameStart + (cur_animation.frames[this.cur_frame].duration / this.cur_anim_speed))
+			{
+				this.frameStart = now;
+			}
+			next_frame = cur_animation.frames[this.cur_frame];
+			this.OnFrameChanged(prev_frame, next_frame);
+			this.runtime.redraw = true;
+		}
+	};
+	instanceProto.getAnimationByName = function (name_)
+	{
+		var i, len, a;
+		for (i = 0, len = this.type.animations.length; i < len; i++)
+		{
+			a = this.type.animations[i];
+			if (cr.equals_nocase(a.name, name_))
+				return a;
+		}
+		return null;
+	};
+	instanceProto.getAnimationBySid = function (sid_)
+	{
+		var i, len, a;
+		for (i = 0, len = this.type.animations.length; i < len; i++)
+		{
+			a = this.type.animations[i];
+			if (a.sid === sid_)
+				return a;
+		}
+		return null;
+	};
+	instanceProto.doChangeAnim = function ()
+	{
+		var prev_frame = this.cur_animation.frames[this.cur_frame];
+		var anim = this.getAnimationByName(this.changeAnimName);
+		this.changeAnimName = "";
+		if (!anim)
+			return;
+		if (cr.equals_nocase(anim.name, this.cur_animation.name) && this.animPlaying)
+			return;
+		this.cur_animation = anim;
+		this.cur_anim_speed = anim.speed;
+		this.cur_anim_repeatto = anim.repeatto;
+		if (this.cur_frame < 0)
+			this.cur_frame = 0;
+		if (this.cur_frame >= this.cur_animation.frames.length)
+			this.cur_frame = this.cur_animation.frames.length - 1;
+		if (this.changeAnimFrom === 1)
+			this.cur_frame = 0;
+		this.animPlaying = true;
+		this.frameStart = this.getNowTime();
+		this.animForwards = true;
+		this.OnFrameChanged(prev_frame, this.cur_animation.frames[this.cur_frame]);
+		this.runtime.redraw = true;
+	};
+	instanceProto.doChangeAnimFrame = function ()
+	{
+		var prev_frame = this.cur_animation.frames[this.cur_frame];
+		var prev_frame_number = this.cur_frame;
+		this.cur_frame = cr.floor(this.changeAnimFrame);
+		if (this.cur_frame < 0)
+			this.cur_frame = 0;
+		if (this.cur_frame >= this.cur_animation.frames.length)
+			this.cur_frame = this.cur_animation.frames.length - 1;
+		if (prev_frame_number !== this.cur_frame)
+		{
+			this.OnFrameChanged(prev_frame, this.cur_animation.frames[this.cur_frame]);
+			this.frameStart = this.getNowTime();
+			this.runtime.redraw = true;
+		}
+		this.changeAnimFrame = -1;
+	};
+	instanceProto.OnFrameChanged = function (prev_frame, next_frame)
+	{
+		var oldw = prev_frame.width;
+		var oldh = prev_frame.height;
+		var neww = next_frame.width;
+		var newh = next_frame.height;
+		if (oldw != neww)
+			this.width *= (neww / oldw);
+		if (oldh != newh)
+			this.height *= (newh / oldh);
+		this.hotspotX = next_frame.hotspotX;
+		this.hotspotY = next_frame.hotspotY;
+		this.collision_poly.set_pts(next_frame.poly_pts);
+		this.set_bbox_changed();
+		this.curFrame = next_frame;
+		this.curWebGLTexture = next_frame.webGL_texture;
+		var i, len, b;
+		for (i = 0, len = this.behavior_insts.length; i < len; i++)
+		{
+			b = this.behavior_insts[i];
+			if (b.onSpriteFrameChanged)
+				b.onSpriteFrameChanged(prev_frame, next_frame);
+		}
+		this.runtime.trigger(cr.plugins_.Sprite.prototype.cnds.OnFrameChanged, this);
+	};
+	instanceProto.draw = function(ctx)
+	{
+		ctx.globalAlpha = this.opacity;
+		var cur_frame = this.curFrame;
+		var spritesheeted = cur_frame.spritesheeted;
+		var cur_image = cur_frame.texture_img;
+		var myx = this.x;
+		var myy = this.y;
+		var w = this.width;
+		var h = this.height;
+		if (this.angle === 0 && w >= 0 && h >= 0)
+		{
+			myx -= this.hotspotX * w;
+			myy -= this.hotspotY * h;
+			if (this.runtime.pixel_rounding)
+			{
+				myx = Math.round(myx);
+				myy = Math.round(myy);
+			}
+			if (spritesheeted)
+			{
+				ctx.drawImage(cur_image, cur_frame.offx, cur_frame.offy, cur_frame.width, cur_frame.height,
+										 myx, myy, w, h);
+			}
+			else
+			{
+				ctx.drawImage(cur_image, myx, myy, w, h);
+			}
+		}
+		else
+		{
+			if (this.runtime.pixel_rounding)
+			{
+				myx = Math.round(myx);
+				myy = Math.round(myy);
+			}
+			ctx.save();
+			var widthfactor = w > 0 ? 1 : -1;
+			var heightfactor = h > 0 ? 1 : -1;
+			ctx.translate(myx, myy);
+			if (widthfactor !== 1 || heightfactor !== 1)
+				ctx.scale(widthfactor, heightfactor);
+			ctx.rotate(this.angle * widthfactor * heightfactor);
+			var drawx = 0 - (this.hotspotX * cr.abs(w))
+			var drawy = 0 - (this.hotspotY * cr.abs(h));
+			if (spritesheeted)
+			{
+				ctx.drawImage(cur_image, cur_frame.offx, cur_frame.offy, cur_frame.width, cur_frame.height,
+										 drawx, drawy, cr.abs(w), cr.abs(h));
+			}
+			else
+			{
+				ctx.drawImage(cur_image, drawx, drawy, cr.abs(w), cr.abs(h));
+			}
+			ctx.restore();
+		}
+		/*
+		ctx.strokeStyle = "#f00";
+		ctx.lineWidth = 3;
+		ctx.beginPath();
+		this.collision_poly.cache_poly(this.width, this.height, this.angle);
+		var i, len, ax, ay, bx, by;
+		for (i = 0, len = this.collision_poly.pts_count; i < len; i++)
+		{
+			ax = this.collision_poly.pts_cache[i*2] + this.x;
+			ay = this.collision_poly.pts_cache[i*2+1] + this.y;
+			bx = this.collision_poly.pts_cache[((i+1)%len)*2] + this.x;
+			by = this.collision_poly.pts_cache[((i+1)%len)*2+1] + this.y;
+			ctx.moveTo(ax, ay);
+			ctx.lineTo(bx, by);
+		}
+		ctx.stroke();
+		ctx.closePath();
+		*/
+		/*
+		if (this.behavior_insts.length >= 1 && this.behavior_insts[0].draw)
+		{
+			this.behavior_insts[0].draw(ctx);
+		}
+		*/
+	};
+	instanceProto.drawGL_earlyZPass = function(glw)
+	{
+		this.drawGL(glw);
+	};
+	instanceProto.drawGL = function(glw)
+	{
+		glw.setTexture(this.curWebGLTexture);
+		glw.setOpacity(this.opacity);
+		var cur_frame = this.curFrame;
+		var q = this.bquad;
+		if (this.runtime.pixel_rounding)
+		{
+			var ox = Math.round(this.x) - this.x;
+			var oy = Math.round(this.y) - this.y;
+			if (cur_frame.spritesheeted)
+				glw.quadTex(q.tlx + ox, q.tly + oy, q.trx + ox, q.try_ + oy, q.brx + ox, q.bry + oy, q.blx + ox, q.bly + oy, cur_frame.sheetTex);
+			else
+				glw.quad(q.tlx + ox, q.tly + oy, q.trx + ox, q.try_ + oy, q.brx + ox, q.bry + oy, q.blx + ox, q.bly + oy);
+		}
+		else
+		{
+			if (cur_frame.spritesheeted)
+				glw.quadTex(q.tlx, q.tly, q.trx, q.try_, q.brx, q.bry, q.blx, q.bly, cur_frame.sheetTex);
+			else
+				glw.quad(q.tlx, q.tly, q.trx, q.try_, q.brx, q.bry, q.blx, q.bly);
+		}
+	};
+	instanceProto.getImagePointIndexByName = function(name_)
+	{
+		var cur_frame = this.curFrame;
+		var i, len;
+		for (i = 0, len = cur_frame.image_points.length; i < len; i++)
+		{
+			if (cr.equals_nocase(name_, cur_frame.image_points[i][0]))
+				return i;
+		}
+		return -1;
+	};
+	instanceProto.getImagePoint = function(imgpt, getX)
+	{
+		var cur_frame = this.curFrame;
+		var image_points = cur_frame.image_points;
+		var index;
+		if (cr.is_string(imgpt))
+			index = this.getImagePointIndexByName(imgpt);
+		else
+			index = imgpt - 1;	// 0 is origin
+		index = cr.floor(index);
+		if (index < 0 || index >= image_points.length)
+			return getX ? this.x : this.y;	// return origin
+		var x = (image_points[index][1] - cur_frame.hotspotX) * this.width;
+		var y = image_points[index][2];
+		y = (y - cur_frame.hotspotY) * this.height;
+		var cosa = Math.cos(this.angle);
+		var sina = Math.sin(this.angle);
+		var x_temp = (x * cosa) - (y * sina);
+		y = (y * cosa) + (x * sina);
+		x = x_temp;
+		x += this.x;
+		y += this.y;
+		return getX ? x : y;
+	};
+	function Cnds() {};
+	var arrCache = [];
+	function allocArr()
+	{
+		if (arrCache.length)
+			return arrCache.pop();
+		else
+			return [0, 0, 0];
+	};
+	function freeArr(a)
+	{
+		a[0] = 0;
+		a[1] = 0;
+		a[2] = 0;
+		arrCache.push(a);
+	};
+	function makeCollKey(a, b)
+	{
+		if (a < b)
+			return "" + a + "," + b;
+		else
+			return "" + b + "," + a;
+	};
+	function collmemory_add(collmemory, a, b, tickcount)
+	{
+		var a_uid = a.uid;
+		var b_uid = b.uid;
+		var key = makeCollKey(a_uid, b_uid);
+		if (collmemory.hasOwnProperty(key))
+		{
+			collmemory[key][2] = tickcount;
+			return;
+		}
+		var arr = allocArr();
+		arr[0] = a_uid;
+		arr[1] = b_uid;
+		arr[2] = tickcount;
+		collmemory[key] = arr;
+	};
+	function collmemory_remove(collmemory, a, b)
+	{
+		var key = makeCollKey(a.uid, b.uid);
+		if (collmemory.hasOwnProperty(key))
+		{
+			freeArr(collmemory[key]);
+			delete collmemory[key];
+		}
+	};
+	function collmemory_removeInstance(collmemory, inst)
+	{
+		var uid = inst.uid;
+		var p, entry;
+		for (p in collmemory)
+		{
+			if (collmemory.hasOwnProperty(p))
+			{
+				entry = collmemory[p];
+				if (entry[0] === uid || entry[1] === uid)
+				{
+					freeArr(collmemory[p]);
+					delete collmemory[p];
+				}
+			}
+		}
+	};
+	var last_coll_tickcount = -2;
+	function collmemory_has(collmemory, a, b)
+	{
+		var key = makeCollKey(a.uid, b.uid);
+		if (collmemory.hasOwnProperty(key))
+		{
+			last_coll_tickcount = collmemory[key][2];
+			return true;
+		}
+		else
+		{
+			last_coll_tickcount = -2;
+			return false;
+		}
+	};
+	var candidates1 = [];
+	Cnds.prototype.OnCollision = function (rtype)
+	{
+		if (!rtype)
+			return false;
+		var runtime = this.runtime;
+		var cnd = runtime.getCurrentCondition();
+		var ltype = cnd.type;
+		var collmemory = null;
+		if (cnd.extra["collmemory"])
+		{
+			collmemory = cnd.extra["collmemory"];
+		}
+		else
+		{
+			collmemory = {};
+			cnd.extra["collmemory"] = collmemory;
+		}
+		if (!cnd.extra["spriteCreatedDestroyCallback"])
+		{
+			cnd.extra["spriteCreatedDestroyCallback"] = true;
+			runtime.addDestroyCallback(function(inst) {
+				collmemory_removeInstance(cnd.extra["collmemory"], inst);
+			});
+		}
+		var lsol = ltype.getCurrentSol();
+		var rsol = rtype.getCurrentSol();
+		var linstances = lsol.getObjects();
+		var rinstances;
+		var registeredInstances;
+		var l, linst, r, rinst;
+		var curlsol, currsol;
+		var tickcount = this.runtime.tickcount;
+		var lasttickcount = tickcount - 1;
+		var exists, run;
+		var current_event = runtime.getCurrentEventStack().current_event;
+		var orblock = current_event.orblock;
+		for (l = 0; l < linstances.length; l++)
+		{
+			linst = linstances[l];
+			if (rsol.select_all)
+			{
+				linst.update_bbox();
+				this.runtime.getCollisionCandidates(linst.layer, rtype, linst.bbox, candidates1);
+				rinstances = candidates1;
+				this.runtime.addRegisteredCollisionCandidates(linst, rtype, rinstances);
+			}
+			else
+			{
+				rinstances = rsol.getObjects();
+			}
+			for (r = 0; r < rinstances.length; r++)
+			{
+				rinst = rinstances[r];
+				if (runtime.testOverlap(linst, rinst) || runtime.checkRegisteredCollision(linst, rinst))
+				{
+					exists = collmemory_has(collmemory, linst, rinst);
+					run = (!exists || (last_coll_tickcount < lasttickcount));
+					collmemory_add(collmemory, linst, rinst, tickcount);
+					if (run)
+					{
+						runtime.pushCopySol(current_event.solModifiers);
+						curlsol = ltype.getCurrentSol();
+						currsol = rtype.getCurrentSol();
+						curlsol.select_all = false;
+						currsol.select_all = false;
+						if (ltype === rtype)
+						{
+							curlsol.instances.length = 2;	// just use lsol, is same reference as rsol
+							curlsol.instances[0] = linst;
+							curlsol.instances[1] = rinst;
+							ltype.applySolToContainer();
+						}
+						else
+						{
+							curlsol.instances.length = 1;
+							currsol.instances.length = 1;
+							curlsol.instances[0] = linst;
+							currsol.instances[0] = rinst;
+							ltype.applySolToContainer();
+							rtype.applySolToContainer();
+						}
+						current_event.retrigger();
+						runtime.popSol(current_event.solModifiers);
+					}
+				}
+				else
+				{
+					collmemory_remove(collmemory, linst, rinst);
+				}
+			}
+			cr.clearArray(candidates1);
+		}
+		return false;
+	};
+	var rpicktype = null;
+	var rtopick = new cr.ObjectSet();
+	var needscollisionfinish = false;
+	var candidates2 = [];
+	var temp_bbox = new cr.rect(0, 0, 0, 0);
+	function DoOverlapCondition(rtype, offx, offy)
+	{
+		if (!rtype)
+			return false;
+		var do_offset = (offx !== 0 || offy !== 0);
+		var oldx, oldy, ret = false, r, lenr, rinst;
+		var cnd = this.runtime.getCurrentCondition();
+		var ltype = cnd.type;
+		var inverted = cnd.inverted;
+		var rsol = rtype.getCurrentSol();
+		var orblock = this.runtime.getCurrentEventStack().current_event.orblock;
+		var rinstances;
+		if (rsol.select_all)
+		{
+			this.update_bbox();
+			temp_bbox.copy(this.bbox);
+			temp_bbox.offset(offx, offy);
+			this.runtime.getCollisionCandidates(this.layer, rtype, temp_bbox, candidates2);
+			rinstances = candidates2;
+		}
+		else if (orblock)
+		{
+			if (this.runtime.isCurrentConditionFirst() && !rsol.else_instances.length && rsol.instances.length)
+				rinstances = rsol.instances;
+			else
+				rinstances = rsol.else_instances;
+		}
+		else
+		{
+			rinstances = rsol.instances;
+		}
+		rpicktype = rtype;
+		needscollisionfinish = (ltype !== rtype && !inverted);
+		if (do_offset)
+		{
+			oldx = this.x;
+			oldy = this.y;
+			this.x += offx;
+			this.y += offy;
+			this.set_bbox_changed();
+		}
+		for (r = 0, lenr = rinstances.length; r < lenr; r++)
+		{
+			rinst = rinstances[r];
+			if (this.runtime.testOverlap(this, rinst))
+			{
+				ret = true;
+				if (inverted)
+					break;
+				if (ltype !== rtype)
+					rtopick.add(rinst);
+			}
+		}
+		if (do_offset)
+		{
+			this.x = oldx;
+			this.y = oldy;
+			this.set_bbox_changed();
+		}
+		cr.clearArray(candidates2);
+		return ret;
+	};
+	typeProto.finish = function (do_pick)
+	{
+		if (!needscollisionfinish)
+			return;
+		if (do_pick)
+		{
+			var orblock = this.runtime.getCurrentEventStack().current_event.orblock;
+			var sol = rpicktype.getCurrentSol();
+			var topick = rtopick.valuesRef();
+			var i, len, inst;
+			if (sol.select_all)
+			{
+				sol.select_all = false;
+				cr.clearArray(sol.instances);
+				for (i = 0, len = topick.length; i < len; ++i)
+				{
+					sol.instances[i] = topick[i];
+				}
+				if (orblock)
+				{
+					cr.clearArray(sol.else_instances);
+					for (i = 0, len = rpicktype.instances.length; i < len; ++i)
+					{
+						inst = rpicktype.instances[i];
+						if (!rtopick.contains(inst))
+							sol.else_instances.push(inst);
+					}
+				}
+			}
+			else
+			{
+				if (orblock)
+				{
+					var initsize = sol.instances.length;
+					for (i = 0, len = topick.length; i < len; ++i)
+					{
+						sol.instances[initsize + i] = topick[i];
+						cr.arrayFindRemove(sol.else_instances, topick[i]);
+					}
+				}
+				else
+				{
+					cr.shallowAssignArray(sol.instances, topick);
+				}
+			}
+			rpicktype.applySolToContainer();
+		}
+		rtopick.clear();
+		needscollisionfinish = false;
+	};
+	Cnds.prototype.IsOverlapping = function (rtype)
+	{
+		return DoOverlapCondition.call(this, rtype, 0, 0);
+	};
+	Cnds.prototype.IsOverlappingOffset = function (rtype, offx, offy)
+	{
+		return DoOverlapCondition.call(this, rtype, offx, offy);
+	};
+	Cnds.prototype.IsAnimPlaying = function (animname)
+	{
+		if (this.changeAnimName.length)
+			return cr.equals_nocase(this.changeAnimName, animname);
+		else
+			return cr.equals_nocase(this.cur_animation.name, animname);
+	};
+	Cnds.prototype.CompareFrame = function (cmp, framenum)
+	{
+		return cr.do_cmp(this.cur_frame, cmp, framenum);
+	};
+	Cnds.prototype.CompareAnimSpeed = function (cmp, x)
+	{
+		var s = (this.animForwards ? this.cur_anim_speed : -this.cur_anim_speed);
+		return cr.do_cmp(s, cmp, x);
+	};
+	Cnds.prototype.OnAnimFinished = function (animname)
+	{
+		return cr.equals_nocase(this.animTriggerName, animname);
+	};
+	Cnds.prototype.OnAnyAnimFinished = function ()
+	{
+		return true;
+	};
+	Cnds.prototype.OnFrameChanged = function ()
+	{
+		return true;
+	};
+	Cnds.prototype.IsMirrored = function ()
+	{
+		return this.width < 0;
+	};
+	Cnds.prototype.IsFlipped = function ()
+	{
+		return this.height < 0;
+	};
+	Cnds.prototype.OnURLLoaded = function ()
+	{
+		return true;
+	};
+	Cnds.prototype.IsCollisionEnabled = function ()
+	{
+		return this.collisionsEnabled;
+	};
+	pluginProto.cnds = new Cnds();
+	function Acts() {};
+	Acts.prototype.Spawn = function (obj, layer, imgpt)
+	{
+		if (!obj || !layer)
+			return;
+		var inst = this.runtime.createInstance(obj, layer, this.getImagePoint(imgpt, true), this.getImagePoint(imgpt, false));
+		if (!inst)
+			return;
+		if (typeof inst.angle !== "undefined")
+		{
+			inst.angle = this.angle;
+			inst.set_bbox_changed();
+		}
+		this.runtime.isInOnDestroy++;
+		var i, len, s;
+		this.runtime.trigger(Object.getPrototypeOf(obj.plugin).cnds.OnCreated, inst);
+		if (inst.is_contained)
+		{
+			for (i = 0, len = inst.siblings.length; i < len; i++)
+			{
+				s = inst.siblings[i];
+				this.runtime.trigger(Object.getPrototypeOf(s.type.plugin).cnds.OnCreated, s);
+			}
+		}
+		this.runtime.isInOnDestroy--;
+		var cur_act = this.runtime.getCurrentAction();
+		var reset_sol = false;
+		if (cr.is_undefined(cur_act.extra["Spawn_LastExec"]) || cur_act.extra["Spawn_LastExec"] < this.runtime.execcount)
+		{
+			reset_sol = true;
+			cur_act.extra["Spawn_LastExec"] = this.runtime.execcount;
+		}
+		var sol;
+		if (obj != this.type)
+		{
+			sol = obj.getCurrentSol();
+			sol.select_all = false;
+			if (reset_sol)
+			{
+				cr.clearArray(sol.instances);
+				sol.instances[0] = inst;
+			}
+			else
+				sol.instances.push(inst);
+			if (inst.is_contained)
+			{
+				for (i = 0, len = inst.siblings.length; i < len; i++)
+				{
+					s = inst.siblings[i];
+					sol = s.type.getCurrentSol();
+					sol.select_all = false;
+					if (reset_sol)
+					{
+						cr.clearArray(sol.instances);
+						sol.instances[0] = s;
+					}
+					else
+						sol.instances.push(s);
+				}
+			}
+		}
+	};
+	Acts.prototype.SetEffect = function (effect)
+	{
+		this.blend_mode = effect;
+		this.compositeOp = cr.effectToCompositeOp(effect);
+		cr.setGLBlend(this, effect, this.runtime.gl);
+		this.runtime.redraw = true;
+	};
+	Acts.prototype.StopAnim = function ()
+	{
+		this.animPlaying = false;
+	};
+	Acts.prototype.StartAnim = function (from)
+	{
+		this.animPlaying = true;
+		this.frameStart = this.getNowTime();
+		if (from === 1 && this.cur_frame !== 0)
+		{
+			this.changeAnimFrame = 0;
+			if (!this.inAnimTrigger)
+				this.doChangeAnimFrame();
+		}
+		if (!this.isTicking)
+		{
+			this.runtime.tickMe(this);
+			this.isTicking = true;
+		}
+	};
+	Acts.prototype.SetAnim = function (animname, from)
+	{
+		this.changeAnimName = animname;
+		this.changeAnimFrom = from;
+		if (!this.isTicking)
+		{
+			this.runtime.tickMe(this);
+			this.isTicking = true;
+		}
+		if (!this.inAnimTrigger)
+			this.doChangeAnim();
+	};
+	Acts.prototype.SetAnimFrame = function (framenumber)
+	{
+		this.changeAnimFrame = framenumber;
+		if (!this.isTicking)
+		{
+			this.runtime.tickMe(this);
+			this.isTicking = true;
+		}
+		if (!this.inAnimTrigger)
+			this.doChangeAnimFrame();
+	};
+	Acts.prototype.SetAnimSpeed = function (s)
+	{
+		this.cur_anim_speed = cr.abs(s);
+		this.animForwards = (s >= 0);
+		if (!this.isTicking)
+		{
+			this.runtime.tickMe(this);
+			this.isTicking = true;
+		}
+	};
+	Acts.prototype.SetAnimRepeatToFrame = function (s)
+	{
+		s = Math.floor(s);
+		if (s < 0)
+			s = 0;
+		if (s >= this.cur_animation.frames.length)
+			s = this.cur_animation.frames.length - 1;
+		this.cur_anim_repeatto = s;
+	};
+	Acts.prototype.SetMirrored = function (m)
+	{
+		var neww = cr.abs(this.width) * (m === 0 ? -1 : 1);
+		if (this.width === neww)
+			return;
+		this.width = neww;
+		this.set_bbox_changed();
+	};
+	Acts.prototype.SetFlipped = function (f)
+	{
+		var newh = cr.abs(this.height) * (f === 0 ? -1 : 1);
+		if (this.height === newh)
+			return;
+		this.height = newh;
+		this.set_bbox_changed();
+	};
+	Acts.prototype.SetScale = function (s)
+	{
+		var cur_frame = this.curFrame;
+		var mirror_factor = (this.width < 0 ? -1 : 1);
+		var flip_factor = (this.height < 0 ? -1 : 1);
+		var new_width = cur_frame.width * s * mirror_factor;
+		var new_height = cur_frame.height * s * flip_factor;
+		if (this.width !== new_width || this.height !== new_height)
+		{
+			this.width = new_width;
+			this.height = new_height;
+			this.set_bbox_changed();
+		}
+	};
+	Acts.prototype.LoadURL = function (url_, resize_, crossOrigin_)
+	{
+		var img = new Image();
+		var self = this;
+		var curFrame_ = this.curFrame;
+		img.onload = function ()
+		{
+			if (curFrame_.texture_img.src === img.src)
+			{
+				if (self.runtime.glwrap && self.curFrame === curFrame_)
+					self.curWebGLTexture = curFrame_.webGL_texture;
+				if (resize_ === 0)		// resize to image size
+				{
+					self.width = img.width;
+					self.height = img.height;
+					self.set_bbox_changed();
+				}
+				self.runtime.redraw = true;
+				self.runtime.trigger(cr.plugins_.Sprite.prototype.cnds.OnURLLoaded, self);
+				return;
+			}
+			curFrame_.texture_img = img;
+			curFrame_.offx = 0;
+			curFrame_.offy = 0;
+			curFrame_.width = img.width;
+			curFrame_.height = img.height;
+			curFrame_.spritesheeted = false;
+			curFrame_.datauri = "";
+			curFrame_.pixelformat = 0;	// reset to RGBA, since we don't know what type of image will have come in
+			if (self.runtime.glwrap)
+			{
+				if (curFrame_.webGL_texture)
+					self.runtime.glwrap.deleteTexture(curFrame_.webGL_texture);
+				curFrame_.webGL_texture = self.runtime.glwrap.loadTexture(img, false, self.runtime.linearSampling);
+				if (self.curFrame === curFrame_)
+					self.curWebGLTexture = curFrame_.webGL_texture;
+				self.type.updateAllCurrentTexture();
+			}
+			if (resize_ === 0)		// resize to image size
+			{
+				self.width = img.width;
+				self.height = img.height;
+				self.set_bbox_changed();
+			}
+			self.runtime.redraw = true;
+			self.runtime.trigger(cr.plugins_.Sprite.prototype.cnds.OnURLLoaded, self);
+		};
+		if (url_.substr(0, 5) !== "data:" && crossOrigin_ === 0)
+			img["crossOrigin"] = "anonymous";
+		this.runtime.setImageSrc(img, url_);
+	};
+	Acts.prototype.SetCollisions = function (set_)
+	{
+		if (this.collisionsEnabled === (set_ !== 0))
+			return;		// no change
+		this.collisionsEnabled = (set_ !== 0);
+		if (this.collisionsEnabled)
+			this.set_bbox_changed();		// needs to be added back to cells
+		else
+		{
+			if (this.collcells.right >= this.collcells.left)
+				this.type.collision_grid.update(this, this.collcells, null);
+			this.collcells.set(0, 0, -1, -1);
+		}
+	};
+	pluginProto.acts = new Acts();
+	function Exps() {};
+	Exps.prototype.AnimationFrame = function (ret)
+	{
+		ret.set_int(this.cur_frame);
+	};
+	Exps.prototype.AnimationFrameCount = function (ret)
+	{
+		ret.set_int(this.cur_animation.frames.length);
+	};
+	Exps.prototype.AnimationName = function (ret)
+	{
+		ret.set_string(this.cur_animation.name);
+	};
+	Exps.prototype.AnimationSpeed = function (ret)
+	{
+		ret.set_float(this.animForwards ? this.cur_anim_speed : -this.cur_anim_speed);
+	};
+	Exps.prototype.ImagePointX = function (ret, imgpt)
+	{
+		ret.set_float(this.getImagePoint(imgpt, true));
+	};
+	Exps.prototype.ImagePointY = function (ret, imgpt)
+	{
+		ret.set_float(this.getImagePoint(imgpt, false));
+	};
+	Exps.prototype.ImagePointCount = function (ret)
+	{
+		ret.set_int(this.curFrame.image_points.length);
+	};
+	Exps.prototype.ImageWidth = function (ret)
+	{
+		ret.set_float(this.curFrame.width);
+	};
+	Exps.prototype.ImageHeight = function (ret)
+	{
+		ret.set_float(this.curFrame.height);
+	};
+	pluginProto.exps = new Exps();
+}());
+;
+;
 cr.plugins_.WebStorage = function(runtime)
 {
 	this.runtime = runtime;
@@ -21099,47 +22670,495 @@ cr.plugins_.rex_TagText = function (runtime) {
     };
     window.RexImageBank = new ImageBankKlass();
 }());
+;
+;
+cr.behaviors.Rex_Button2 = function(runtime)
+{
+	this.runtime = runtime;
+};
+(function ()
+{
+	var behaviorProto = cr.behaviors.Rex_Button2.prototype;
+	behaviorProto.Type = function(behavior, objtype)
+	{
+		this.behavior = behavior;
+		this.objtype = objtype;
+		this.runtime = behavior.runtime;
+	};
+	var behtypeProto = behaviorProto.Type.prototype;
+	behtypeProto.onCreate = function()
+	{
+        this.touchwrap = null;
+	};
+	behtypeProto.TouchWrapGet = function ()
+	{
+        if (this.touchwrap != null)
+            return;
+        var plugins = this.runtime.types;
+        var name, obj;
+        for (name in plugins)
+        {
+            obj = plugins[name].instances[0];
+            if ((obj != null) && (obj.check_name == "TOUCHWRAP"))
+            {
+                this.touchwrap = obj;
+                this.touchwrap.HookMe(this);
+                break;
+            }
+        }
+;
+	};
+	function GetThisBehavior(inst)
+	{
+		var i, len;
+		for (i = 0, len = inst.behavior_insts.length; i < len; i++)
+		{
+			if (inst.behavior_insts[i] instanceof behaviorProto.Instance)
+				return inst.behavior_insts[i];
+		}
+		return null;
+	};
+    var _touch_insts = [];
+	var _behavior_insts = [];
+    behtypeProto.OnTouchStart = function (touch_src, touchX, touchY)
+    {
+        _touch_insts.length = 0;
+        _behavior_insts.length = 0;
+        var insts = this.objtype.instances, inst;
+        var lx, ly;
+        var i, cnt=insts.length;
+        for (i=0; i<cnt; i++)
+        {
+            inst = insts[i];
+            inst.update_bbox();
+			lx = inst.layer.canvasToLayer(touchX, touchY, true);
+			ly = inst.layer.canvasToLayer(touchX, touchY, false);
+            if (inst.contains_pt(lx, ly))
+                _touch_insts.push(inst);
+        }
+        var touch_insts_cnt=_touch_insts.length
+        if (touch_insts_cnt === 0)
+        {
+            _touch_insts.length = 0;
+            _behavior_insts.length = 0;
+            return false;
+        }
+        var behavior_inst;
+        cnt = touch_insts_cnt;
+        _behavior_insts.length = 0;
+        for (i=0; i<cnt; i++ )
+        {
+		    inst = _touch_insts[i];
+		    if (!inst)
+		    {
+		        continue;
+		    }
+            behavior_inst = GetThisBehavior(inst);
+            if (behavior_inst == null)
+                continue;
+            if (behavior_inst.is_enable())
+			    _behavior_insts.push(behavior_inst);
+        }
+        cnt = _behavior_insts.length;
+		if (cnt === 0)  // no inst match
+        {
+            _touch_insts.length = 0;
+            _behavior_insts.length = 0;
+            return false;
+        }
+        var target_inst_behavior = _behavior_insts[0];
+        var instB=target_inst_behavior.inst, instA;
+        for (i=1; i<cnt; i++ )
+        {
+            behavior_inst = _behavior_insts[i];
+            instA = behavior_inst.inst;
+            if ( ( instA.layer.index > instB.layer.index) ||
+                 ( (instA.layer.index == instB.layer.index) && (instA.get_zindex() > instB.get_zindex()) ) )
+            {
+                target_inst_behavior = behavior_inst;
+                instB = instA;
+            }
+        }
+        _touch_insts.length = 0;
+        _behavior_insts.length = 0;
+		target_inst_behavior.start_click_detecting(touch_src);
+        return true;  // get drag inst
+    };
+    behtypeProto.OnTouchEnd = function (touch_src)
+    {
+		var insts = this.objtype.instances;
+        var i, cnt=insts.length, inst, behavior_inst;
+        for (i=0; i<cnt; i++ )
+        {
+		    inst = insts[i];
+		    if (!inst)
+		    {
+		        continue;
+		    }
+            behavior_inst = GetThisBehavior(inst);
+            if (behavior_inst == null)
+                continue;
+			if ((behavior_inst.touchSrc == touch_src) && (behavior_inst.buttonState == CLICK_DETECTING_STATE))
+                behavior_inst.finish_click_detecting();
+        }
+    };
+	behaviorProto.Instance = function(type, inst)
+	{
+		this.type = type;
+		this.behavior = type.behavior;
+		this.inst = inst;				// associated object instance to modify
+		this.runtime = type.runtime;
+        type.TouchWrapGet();
+	};
+	var behinstProto = behaviorProto.Instance.prototype;
+    var OFF_STATE = 0;
+    var INACTIVE_STATE = 1;
+    var ACTIVE_STATE = 2;
+    var CLICK_DETECTING_STATE = 3;
+    var CLICKED_STATE = 4;
+    var state2name = ["OFF","INACTIVE","ACTIVE","CLICK DETECTING","CLICKED"];
+    var NORMAL_DISPLAY = 0;
+    var CLICKED_DISPLAY = 1;
+    var INACTIVE_DISPLAY = 2;
+    var ROLLINGIN_DISPLAY = 3;
+	behinstProto.onCreate = function()
+	{
+	    this.initActivated = (this.properties[0]==1);
+        this.clickMode = this.properties[1];
+        this.isAutoCLICK2ACTIVE = (this.properties[2]==1);
+		this.isVisibleChecking = (this.properties[3]==1);
+        this.touchSrc = null;
+        this.buttonState = OFF_STATE;
+        this.buttonPreState = null;
+        this.initFlag = true;
+        this.rollingoverFlag = false;
+        this.displayAnim = {normal:"",
+                         click:"",
+                         inactive:"",
+                         rollingin:"",
+                         frameSpeedSave:0,
+                         cur_name:null};
+        this.isSetStateInAction = false;
+	};
+	behinstProto.tick = function ()
+	{
+        this._init();
+        if (this.buttonState == INACTIVE_STATE)
+            return;
+        var is_touch_inside = this._is_touch_inside();
+        this._check_click_cancel(is_touch_inside);
+        this._check_rollingover(is_touch_inside);
+	};
+	behinstProto.is_enable = function()
+	{
+	    var is_visible;
+	    if (this.isVisibleChecking)
+		{
+	        var layer = this.runtime.getLayerByNumber(this.inst.layer.index);
+	        is_visible = (layer.visible && this.inst.visible);
+        }
+		else
+		    is_visible = true;
+        return ( (this.buttonState == ACTIVE_STATE) && is_visible );
+	};
+	behinstProto._display_frame = function(frame_index)
+	{
+        this.displayAnim.frameSpeedSave = this.inst.cur_anim_speed;
+        this.inst.cur_anim_speed = 0;
+        if (frame_index != null)
+            cr.plugins_.Sprite.prototype.acts.SetAnimFrame.apply(this.inst, [frame_index]);
+	};
+	behinstProto._display_animation = function(anim_name)
+	{
+        var frameSpeedSave = this.displayAnim.frameSpeedSave;
+        if (frameSpeedSave != null)
+            this.inst.cur_anim_speed = frameSpeedSave;
+        if (anim_name != "")
+            cr.plugins_.Sprite.prototype.acts.SetAnim.apply(this.inst, [anim_name, 1]);
+	};
+	behinstProto._set_animation = function(display, name)
+	{
+       if (typeof(display) == "number")
+       {
+           this._display_frame(display);
+       }
+       else if (display != "")
+       {
+           this._display_animation(display);
+       }
+       this.displayAnim.cur_name = name;
+	};
+	behinstProto._init = function()
+	{
+        if (!this.initFlag)
+            return;
+        this.displayAnim.frameSpeedSave = this.inst.cur_anim_speed;
+        if (this.initActivated != null)
+        {
+            if (this.initActivated)
+                this._goto_active_state();
+            else
+                this._goto_inactive_state();
+        }
+        this.initFlag = false;
+	};
+	behinstProto._is_touch_inside = function ()
+	{
+        var touchwrap = this.type.touchwrap;
+        var touch_x = this.GetTouchX();
+        var touch_y = this.GetTouchY();
+        this.inst.update_bbox();
+        return this.inst.contains_pt(touch_x, touch_y);
+	};
+	behinstProto._check_click_cancel = function (is_touch_inside)
+	{
+        if ((this.buttonState == CLICK_DETECTING_STATE) && (!is_touch_inside))
+        {
+            this.cancel_click_detecting();
+            this._goto_active_state();
+        }
+	};
+	behinstProto._check_rollingover = function (is_touch_inside)
+	{
+        if (is_touch_inside)
+        {
+            if (!this.rollingoverFlag)
+            {
+                this._set_animation(this.displayAnim.rollingin, ROLLINGIN_DISPLAY);
+                this.rollingoverFlag = true;
+                this.runtime.trigger(cr.behaviors.Rex_Button2.prototype.cnds.OnRollingIn, this.inst);
+            }
+        }
+        else
+        {
+            if (this.rollingoverFlag)
+            {
+                this.rollingoverFlag = false;
+                if (this.displayAnim.cur_name == ROLLINGIN_DISPLAY)
+                    this._set_animation(this.displayAnim.normal, NORMAL_DISPLAY);
+                this.runtime.trigger(cr.behaviors.Rex_Button2.prototype.cnds.OnRollingOut, this.inst);
+            }
+        }
+	};
+	behinstProto._set_state = function (state)
+	{
+	    this.buttonPreState = this.buttonState;
+        this.buttonState = state;
+	};
+	behinstProto.start_click_detecting = function (touch_src)
+	{
+        if (this.clickMode == 0)
+        {
+            this.touchSrc = touch_src;
+            this._set_state(CLICK_DETECTING_STATE);
+            this.runtime.trigger(cr.behaviors.Rex_Button2.prototype.cnds.OnClickStart, this.inst);
+        }
+        else
+            this.finish_click_detecting();
+	};
+	behinstProto._goto_active_state = function ()
+	{
+	    this.initActivated = null;
+        this.touchSrc = null;
+        this._set_state(ACTIVE_STATE);
+        this._set_animation(this.displayAnim.normal, NORMAL_DISPLAY);
+        this.runtime.trigger(cr.behaviors.Rex_Button2.prototype.cnds.OnActivated, this.inst);
+	};
+	behinstProto._goto_inactive_state = function ()
+	{
+	    this.initActivated = null;
+        this.touchSrc = null;
+        this._set_state(INACTIVE_STATE);
+        this._set_animation(this.displayAnim.inactive, INACTIVE_DISPLAY);
+        this.runtime.trigger(cr.behaviors.Rex_Button2.prototype.cnds.OnInactivated, this.inst);
+	};
+	behinstProto.cancel_click_detecting = function ()
+	{
+        this.runtime.trigger(cr.behaviors.Rex_Button2.prototype.cnds.OnClickCancel, this.inst);
+	};
+	behinstProto.finish_click_detecting = function ()
+	{
+        this._set_state(CLICKED_STATE);
+        this._set_animation(this.displayAnim.click, CLICKED_DISPLAY);
+        this.isSetStateInAction = false;
+        this.runtime.trigger(cr.behaviors.Rex_Button2.prototype.cnds.OnClick, this.inst);
+        if (this.isAutoCLICK2ACTIVE && !this.isSetStateInAction)
+        {
+            this._set_animation(this.displayAnim.normal, NORMAL_DISPLAY);
+            this._set_state(ACTIVE_STATE);
+        }
+	};
+	behinstProto.GetTouchX = function()
+	{
+        return this.type.touchwrap.XForID(this.touchSrc, this.inst.layer.index);
+	};
+	behinstProto.GetTouchY = function()
+	{
+        return this.type.touchwrap.YForID(this.touchSrc, this.inst.layer.index);
+	};
+	behinstProto.saveToJSON = function ()
+	{
+	    var activated = (this.buttonState != INACTIVE_STATE);
+		return { "en": activated,
+                 "fn": this.displayAnim.normal,
+                 "fc": this.displayAnim.click,
+                 "fi": this.displayAnim.inactive,
+                 "fr": this.displayAnim.rollingin};
+	};
+	behinstProto.loadFromJSON = function (o)
+	{
+		var activated = o["en"];
+		if (activated)
+		    this._goto_active_state();
+		else
+		    this._goto_inactive_state();
+        this.displayAnim.normal = o["fn"];
+        this.displayAnim.click = o["fc"];
+        this.displayAnim.inactive = o["fi"];
+        this.displayAnim.rollingin = o["fr"];
+	};
+	behinstProto._cmd_goto_state = function (state)
+	{
+	    if (state == this.buttonState)  // state does not change
+	        return;
+	    if (this.buttonState == CLICK_DETECTING_STATE)
+	        this.cancel_click_detecting();
+	    if (state == ACTIVE_STATE)
+	        this._goto_active_state();
+	    else
+	        this._goto_inactive_state();
+	};
+	function Cnds() {};
+	behaviorProto.cnds = new Cnds();
+	Cnds.prototype.OnClick = function ()
+	{
+        return true;
+	};
+	Cnds.prototype.OnClickCancel = function ()
+	{
+        return true;
+	};
+	Cnds.prototype.OnClickStart = function ()
+	{
+        return true;
+	};
+	Cnds.prototype.OnActivated = function ()
+	{
+        return true;
+	};
+	Cnds.prototype.OnInactivated = function ()
+	{
+        return true;
+	};
+	Cnds.prototype.OnRollingIn = function ()
+	{
+        return true;
+	};
+	Cnds.prototype.OnRollingOut = function ()
+	{
+        return true;
+	};
+	Cnds.prototype.IsEnable = function ()
+	{
+        return this.is_enable();
+	};
+	function Acts() {};
+	behaviorProto.acts = new Acts();
+	Acts.prototype.GotoACTIVE = function (_layer)
+	{
+        this.isSetStateInAction = true;
+	    var state = ACTIVE_STATE;
+	    if ((_layer!= null) && (this.inst.layer != _layer))
+	        state = INACTIVE_STATE;
+	    this._cmd_goto_state(state);
+	};
+	Acts.prototype.GotoINACTIVE = function (_layer)
+	{
+        this.isSetStateInAction = true;
+	    var state = INACTIVE_STATE;
+	    if ((_layer!= null) && (this.inst.layer != _layer))
+	        state = ACTIVE_STATE;
+	    this._cmd_goto_state(state);
+	};
+	Acts.prototype.SetDisplay = function (display_normal, display_click, display_inactive, display_rollingin)
+	{
+        this.displayAnim.normal = display_normal;
+        this.displayAnim.click = display_click;
+        this.displayAnim.inactive = display_inactive;
+        this.displayAnim.rollingin = display_rollingin;
+        this._init();
+	};
+	Acts.prototype.ManualTriggerCondition = function (condition_type)
+	{
+        var conds = cr.behaviors.Rex_Button2.prototype.cnds;
+        var trig;
+        switch (condition_type)
+        {
+        case 0: trig = conds.OnClick;        break;
+        case 1: trig = conds.OnClickCancel;  break;
+        case 2: trig = conds.OnClickStart;   break;
+        case 3: trig = conds.OnActivated;    break;
+        case 4: trig = conds.OnInactivated;  break;
+        case 5: trig = conds.OnRollingIn;    break;
+        case 6: trig = conds.OnRollingOut;   break;
+        }
+        this.runtime.trigger(trig, this.inst);
+	};
+	function Exps() {};
+	behaviorProto.exps = new Exps();
+	Exps.prototype.CurState = function (ret)
+	{
+	    ret.set_string(state2name[this.buttonState]);
+	};
+	Exps.prototype.PreState = function (ret)
+	{
+	    ret.set_string(state2name[this.buttonPreState]);
+	};
+}());
 cr.getObjectRefTable = function () { return [
-	cr.plugins_.Button,
+	cr.plugins_.AJAX,
 	cr.plugins_.Browser,
+	cr.plugins_.Button,
 	cr.plugins_.Function,
 	cr.plugins_.Rex_Date,
 	cr.plugins_.Rex_Comment,
 	cr.plugins_.Rex_FrameMessage,
-	cr.plugins_.Rex_JSONBuider,
-	cr.plugins_.Rex_MomenJS,
 	cr.plugins_.Rex_jsshell,
+	cr.plugins_.Rex_MomenJS,
+	cr.plugins_.Rex_JSONBuider,
 	cr.plugins_.Rex_Hash,
-	cr.plugins_.rex_TagText,
 	cr.plugins_.Rex_taffydb,
-	cr.plugins_.Rex_WaitEvent,
+	cr.plugins_.rex_TagText,
 	cr.plugins_.Rex_WebstorageExt,
+	cr.plugins_.Rex_WaitEvent,
+	cr.plugins_.Sprite,
 	cr.plugins_.WebStorage,
+	cr.behaviors.Rex_Button2,
+	cr.plugins_.Function.prototype.cnds.OnFunction,
+	cr.plugins_.Rex_jsshell.prototype.acts.SetFunctionName,
+	cr.plugins_.Rex_jsshell.prototype.acts.AddValue,
+	cr.plugins_.Rex_jsshell.prototype.acts.AddCallback,
+	cr.plugins_.Rex_jsshell.prototype.acts.InvokeFunction,
+	cr.plugins_.Rex_jsshell.prototype.cnds.OnCallback,
+	cr.plugins_.rex_TagText.prototype.acts.SetText,
+	cr.plugins_.rex_TagText.prototype.acts.AppendText,
+	cr.plugins_.Rex_jsshell.prototype.exps.Param,
 	cr.system_object.prototype.cnds.IsGroupActive,
 	cr.system_object.prototype.cnds.OnLayoutStart,
 	cr.plugins_.Rex_jsshell.prototype.acts.LoadAPI,
-	cr.plugins_.Rex_jsshell.prototype.cnds.OnCallback,
 	cr.plugins_.Browser.prototype.acts.ConsoleLog,
-	cr.plugins_.Rex_jsshell.prototype.acts.SetFunctionName,
-	cr.plugins_.Rex_jsshell.prototype.acts.AddValue,
-	cr.plugins_.Rex_jsshell.prototype.acts.InvokeFunction,
 	cr.plugins_.Rex_jsshell.prototype.acts.SetProp,
 	cr.system_object.prototype.acts.SetGroupActive,
-	cr.plugins_.Function.prototype.cnds.OnFunction,
 	cr.plugins_.Rex_jsshell.prototype.acts.CreateInstance,
-	cr.plugins_.Rex_jsshell.prototype.acts.AddCallback,
 	cr.plugins_.Rex_jsshell.prototype.acts.AddJSON,
 	cr.plugins_.Function.prototype.exps.Param,
 	cr.plugins_.Rex_jsshell.prototype.acts.AddObject,
-	cr.plugins_.Rex_jsshell.prototype.exps.Param,
 	cr.plugins_.Rex_Comment.prototype.acts.NOOP,
 	cr.plugins_.Rex_Hash.prototype.acts.StringToHashTable,
 	cr.plugins_.Rex_Hash.prototype.exps.At,
 	cr.plugins_.Browser.prototype.acts.ExecJs,
-	cr.plugins_.rex_TagText.prototype.acts.SetText,
 	cr.plugins_.Rex_Hash.prototype.cnds.ForEachItem,
 	cr.plugins_.Rex_Hash.prototype.exps.CurValue,
-	cr.plugins_.rex_TagText.prototype.acts.AppendText,
 	cr.system_object.prototype.exps.newline,
 	cr.plugins_.Rex_taffydb.prototype.acts.SetValue,
 	cr.plugins_.Rex_MomenJS.prototype.acts.SetFromString,
@@ -21152,20 +23171,44 @@ cr.getObjectRefTable = function () { return [
 	cr.system_object.prototype.cnds.Compare,
 	cr.system_object.prototype.exps["int"],
 	cr.system_object.prototype.cnds.Else,
-	cr.plugins_.Button.prototype.cnds.OnClicked,
+	cr.plugins_.Function.prototype.acts.SetReturnValue,
+	cr.system_object.prototype.exps.str,
+	cr.plugins_.Rex_jsshell.prototype.exps.Prop,
+	cr.plugins_.Function.prototype.acts.CallFunction,
+	cr.plugins_.Rex_Hash.prototype.acts.CleanAll,
+	cr.plugins_.Rex_Hash.prototype.acts.InsertValue,
+	cr.plugins_.Rex_Hash.prototype.exps.AtKeys,
+	cr.plugins_.Sprite.prototype.acts.SetAnimFrame,
+	cr.plugins_.Sprite.prototype.acts.Destroy,
+	cr.plugins_.Rex_taffydb.prototype.acts.RemoveByRowID,
+	cr.system_object.prototype.exps.projectversion,
 	cr.plugins_.Rex_JSONBuider.prototype.acts.Clean,
 	cr.plugins_.Rex_JSONBuider.prototype.cnds.SetRoot,
 	cr.plugins_.Rex_JSONBuider.prototype.acts.AddValue,
-	cr.plugins_.Function.prototype.acts.CallFunction,
 	cr.plugins_.Rex_JSONBuider.prototype.exps.AsJSON,
+	cr.plugins_.Rex_JSONBuider.prototype.acts.AddBooleanValue,
+	cr.plugins_.Rex_Hash.prototype.exps.AsJSON,
+	cr.plugins_.Function.prototype.exps.Call,
+	cr.system_object.prototype.acts.SnapshotCanvas,
+	cr.system_object.prototype.cnds.OnCanvasSnapshot,
+	cr.system_object.prototype.exps.canvassnapshot,
+	cr.system_object.prototype.acts.Wait,
+	cr.plugins_.Browser.prototype.cnds.OnBackButton,
+	cr.system_object.prototype.exps.time,
+	cr.system_object.prototype.exps.layoutname,
+	cr.plugins_.Browser.prototype.acts.Close,
+	cr.system_object.prototype.acts.GoToLayoutByName,
+	cr.plugins_.Rex_WebstorageExt.prototype.exps.LocalValue,
+	cr.plugins_.Button.prototype.cnds.OnClicked,
 	cr.plugins_.Rex_taffydb.prototype.cnds.ForEachRow,
 	cr.plugins_.Rex_MomenJS.prototype.acts.SetFromUnixTimestamp,
 	cr.plugins_.Rex_Date.prototype.exps.UnixTimestamp,
 	cr.plugins_.Rex_MomenJS.prototype.exps.StartOfMonth,
 	cr.plugins_.Rex_taffydb.prototype.exps.CurRowContent,
-	cr.plugins_.Rex_WebstorageExt.prototype.exps.LocalValue,
 	cr.plugins_.WebStorage.prototype.exps.LocalValue,
 	cr.plugins_.Rex_FrameMessage.prototype.exps.Param,
 	cr.system_object.prototype.cnds.For,
-	cr.system_object.prototype.exps.loopindex
+	cr.system_object.prototype.exps.loopindex,
+	cr.system_object.prototype.cnds.OnLoadFinished,
+	cr.system_object.prototype.acts.GoToLayout
 ];};
