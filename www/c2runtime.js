@@ -22999,7 +22999,5 @@ cr.getObjectRefTable = function () { return [
 	cr.plugins_.Rex_MomenJS.prototype.exps.StartOfMonth,
 	cr.plugins_.Rex_taffydb.prototype.exps.CurRowContent,
 	cr.system_object.prototype.cnds.For,
-	cr.system_object.prototype.exps.loopindex,
-	cr.system_object.prototype.cnds.OnLoadFinished,
-	cr.system_object.prototype.acts.GoToLayout
+	cr.system_object.prototype.exps.loopindex
 ];};
